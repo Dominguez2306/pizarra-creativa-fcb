@@ -283,6 +283,12 @@
   .bench-card .bpos{ display:block; font-size:10px; color:var(--muted); }
 
   .rowbtns{ display:flex; flex-wrap:wrap; gap:6px; }
+  .stepbar{ display:flex; align-items:center; gap:8px; }
+  .stepinfo{ flex:1; text-align:center; font-size:12.5px; font-weight:700; color:var(--gold); }
+  .formteam{ color:var(--gold); }
+  .minibtn:disabled{ opacity:.36; cursor:not-allowed; }
+  .minibtn:disabled:hover{ background:rgba(255,255,255,.12); transform:none; }
+  .modebtn,.minibtn,select,.teamtabs-btn,.cand,.bench-card{ -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
 
   /* ===================== BARRA DE AVISO ===================== */
   .hintbar{
@@ -295,7 +301,10 @@
   /* ===================== RESPONSIVE ===================== */
   @media (max-width: 980px){
     :root{ --ts: clamp(30px, 8.4vw, 54px); }
-    .board{ flex-direction:column; }
+    header.topbar{ gap:8px 10px; padding:8px 10px; }
+    .modebtn{ font-size:12px; padding:7px 9px; }
+    .actions{ width:100%; }
+    .board{ flex-direction:column; align-items:stretch; }
     .pitch{ width:100%; }
     .panel{ flex:1 1 auto; max-width:none; }
     .modes{ margin-left:0; order:3; width:100%; }
@@ -334,7 +343,7 @@
     </div>
 
     <div class="actions">
-      <label for="formation">Formación
+      <label for="formation">Formación <b id="formTeamName" class="formteam">Barça</b>
         <select id="formation">
           <option value="4-3-3">4-3-3</option>
           <option value="4-2-3-1">4-2-3-1</option>
@@ -405,7 +414,26 @@
             <div class="stat"><b id="statBalls">0</b><span>Balones</span></div>
             <div class="stat"><b id="statStrokes">0</b><span>Dibujos</span></div>
             <div class="stat"><b id="statRival">11</b><span>Rival en campo</span></div>
+            <div class="stat"><b id="statSteps">0</b><span>Pasos</span></div>
           </div>
+        </div>
+
+        <div class="card">
+          <h3>Jugada por pasos</h3>
+          <div class="stepbar">
+            <button class="minibtn" id="stepPrevBtn" type="button" title="Paso anterior">◀</button>
+            <span class="stepinfo" id="stepInfo">Sin pasos</span>
+            <button class="minibtn" id="stepNextBtn" type="button" title="Paso siguiente">▶</button>
+          </div>
+          <div class="rowbtns" style="margin-top:8px">
+            <button class="minibtn" id="stepAddBtn" type="button">➕ Añadir paso</button>
+            <button class="minibtn" id="stepDelBtn" type="button">🗑 Borrar paso</button>
+          </div>
+          <div class="rowbtns" style="margin-top:6px">
+            <button class="minibtn" id="playBtn" type="button">▶ Reproducir</button>
+            <button class="minibtn" id="loopBtn" type="button">🔁 Bucle</button>
+          </div>
+          <p class="muted" style="margin-top:8px">Coloca a los jugadores y pulsa <b>Añadir paso</b> en cada momento de la jugada. Después <b>Reproducir</b> para animarla.</p>
         </div>
 
         <div class="card">
@@ -568,7 +596,11 @@ let arrows = [];
 let strokes = [];
 let selected = null;
 let mode = 'move';
-let currentFormation = '4-3-3';
+let formations = { barca:'4-3-3', rival:'4-3-3' };
+let steps = [];
+let stepIndex = 0;
+let playing = false, loop = false, animRaf = 0, suppressStepSync = false;
+const deepCopy = o => JSON.parse(JSON.stringify(o));
 let showNames = true;
 let showRatings = true;
 let subCount = 0;
@@ -597,13 +629,14 @@ function defaultSquad(){
     if(p){ p.place = 'field'; p.x = slot.x; p.y = slot.y; }
   });
   arrows = []; cones = []; balls = []; strokes = []; selected = null; subCount = 0;
-  coneSeq = 0; ballSeq = 0; currentFormation = '4-3-3'; teamFilter = 'barca';
+  coneSeq = 0; ballSeq = 0; formations = { barca:'4-3-3', rival:'4-3-3' }; teamFilter = 'barca';
+  steps = []; stepIndex = 0; playing = false; suppressStepSync = false;
 }
 
 /* =========================================================
    4. RENDER
    ========================================================= */
-function renderAll(){ renderField(); renderBench(); renderArrows(); renderStats(); renderInfo(); updateTeamTabs(); }
+function renderAll(){ renderField(); renderBench(); renderArrows(); renderStats(); renderInfo(); updateTeamTabs(); updateStepUI(); }
 
 function renderField(){
   fieldLayer.innerHTML = '';
@@ -646,6 +679,12 @@ function buildBall(b){
   el.textContent = '⚽';
   el.addEventListener('pointerdown', onBallPointerDown);
   return el;
+}
+
+function renderProps(){
+  Array.prototype.slice.call(fieldLayer.querySelectorAll('.cone,.ball')).forEach(el => el.remove());
+  cones.forEach(k => fieldLayer.appendChild(buildCone(k)));
+  balls.forEach(b => fieldLayer.appendChild(buildBall(b)));
 }
 
 function renderBench(){
@@ -790,6 +829,7 @@ function renderInfo(){
    5. ARRASTRE DE JUGADORES
    ========================================================= */
 function onTokenPointerDown(e){
+  if(playing) stopPlay();
   if(mode !== 'move') return;
   if(e.button !== undefined && e.button !== 0) return;
   e.preventDefault();
@@ -801,7 +841,7 @@ function onTokenPointerDown(e){
   const rect = pitch.getBoundingClientRect();
   const offX = e.clientX - (rect.left + p.x * rect.width);
   const offY = e.clientY - (rect.top  + p.y * rect.height);
-  el.setPointerCapture(e.pointerId);
+  try { el.setPointerCapture(e.pointerId); } catch(_){}
   el.classList.add('dragging');
 
   let moved = false;
@@ -839,7 +879,7 @@ function onBenchPointerDown(e){
 
   const sx = e.clientX, sy = e.clientY;
   let moved = false, ghost = null, target = null;
-  el.setPointerCapture(e.pointerId);
+  try { el.setPointerCapture(e.pointerId); } catch(_){}
 
   const onMove = (ev) => {
     if(!moved && (Math.abs(ev.clientX-sx) > 6 || Math.abs(ev.clientY-sy) > 6)){
@@ -903,7 +943,7 @@ function onConePointerDown(e){
   const rect = pitch.getBoundingClientRect();
   const offX = e.clientX - (rect.left + k.x * rect.width);
   const offY = e.clientY - (rect.top  + k.y * rect.height);
-  el.setPointerCapture(e.pointerId);
+  try { el.setPointerCapture(e.pointerId); } catch(_){}
   const onMove = (ev) => {
     const nx = clamp((ev.clientX-rect.left-offX)/rect.width, 0.02, 0.98);
     const ny = clamp((ev.clientY-rect.top -offY)/rect.height, 0.03, 0.97);
@@ -934,7 +974,7 @@ function onBallPointerDown(e){
   const rect = pitch.getBoundingClientRect();
   const offX = e.clientX - (rect.left + b.x * rect.width);
   const offY = e.clientY - (rect.top  + b.y * rect.height);
-  el.setPointerCapture(e.pointerId);
+  try { el.setPointerCapture(e.pointerId); } catch(_){}
   const onMove = (ev) => {
     const nx = clamp((ev.clientX-rect.left-offX)/rect.width, 0.02, 0.98);
     const ny = clamp((ev.clientY-rect.top -offY)/rect.height, 0.03, 0.97);
@@ -962,6 +1002,7 @@ function toFrac(cx, cy){
   return { x:(cx-r.left)/r.width, y:(cy-r.top)/r.height };
 }
 pitch.addEventListener('pointerdown', (e) => {
+  if(playing) stopPlay();
   if(mode === 'move') return;
 
   if(mode === 'cone' || mode === 'ball'){
@@ -1069,6 +1110,120 @@ function interchange(aUid, bUid){
 }
 
 /* =========================================================
+   8b. JUGADAS POR PASOS Y ANIMACIÓN
+   ========================================================= */
+function snapshotStep(){
+  return {
+    players: players.map(p => ({ uid:p.uid, place:p.place, x:p.x, y:p.y })),
+    arrows: deepCopy(arrows),
+    strokes: deepCopy(strokes),
+    cones: deepCopy(cones),
+    balls: deepCopy(balls),
+  };
+}
+function setDecor(s){
+  arrows = deepCopy(s.arrows || []);
+  strokes = deepCopy(s.strokes || []);
+  cones = deepCopy(s.cones || []);
+  balls = deepCopy(s.balls || []);
+}
+function applyStep(s){
+  (s.players || []).forEach(sp => {
+    const p = byUid(sp.uid);
+    if(p){ if(sp.place) p.place = sp.place; p.x = sp.x; p.y = sp.y; }
+  });
+  setDecor(s);
+  selected = null;
+  renderAll();
+}
+function updateStepUI(){
+  const info = document.getElementById('stepInfo');
+  const st = document.getElementById('statSteps');
+  if(st) st.textContent = steps.length;
+  if(!info) return;
+  info.textContent = steps.length ? ('Paso ' + (stepIndex + 1) + ' / ' + steps.length) : 'Sin pasos';
+  const prev = document.getElementById('stepPrevBtn'), next = document.getElementById('stepNextBtn');
+  if(prev) prev.disabled = !steps.length || stepIndex <= 0;
+  if(next) next.disabled = !steps.length || stepIndex >= steps.length - 1;
+  const lb = document.getElementById('loopBtn'); if(lb) lb.classList.toggle('on', loop);
+}
+function goToStep(i){
+  if(!steps.length || i < 0 || i >= steps.length) return;
+  steps[stepIndex] = snapshotStep();
+  stepIndex = i;
+  applyStep(steps[stepIndex]);
+  saveState();
+}
+function addStep(){
+  const snap = snapshotStep();
+  if(!steps.length){ steps = [snap]; stepIndex = 0; }
+  else { steps.splice(stepIndex + 1, 0, deepCopy(snap)); stepIndex++; }
+  renderAll();
+  saveState();
+}
+function deleteStep(){
+  if(!steps.length) return;
+  if(steps.length === 1){ steps = []; stepIndex = 0; }
+  else { steps.splice(stepIndex, 1); stepIndex = clamp(stepIndex, 0, steps.length - 1); applyStep(steps[stepIndex]); }
+  renderAll();
+  saveState();
+}
+function animateTo(step, dur, done){
+  const target = {};
+  (step.players || []).forEach(sp => { target[sp.uid] = sp; });
+  const from = {};
+  players.forEach(p => { if(p.place === 'field') from[p.uid] = { x:p.x, y:p.y }; });
+  setDecor(step); renderArrows(); renderProps();
+  const els = {};
+  Array.prototype.slice.call(fieldLayer.querySelectorAll('.token')).forEach(el => { els[el.dataset.uid] = el; });
+  const t0 = performance.now();
+  function frame(t){
+    if(!playing) return;
+    const k = Math.min(1, (t - t0) / dur);
+    const e = k < 0.5 ? 2*k*k : 1 - Math.pow(-2*k + 2, 2)/2;
+    Object.keys(from).forEach(uid => {
+      const f = from[uid], tp = target[uid]; if(!tp) return;
+      const p = byUid(uid); if(!p) return;
+      p.x = f.x + (tp.x - f.x) * e;
+      p.y = f.y + (tp.y - f.y) * e;
+      const el = els[uid];
+      if(el){ el.style.left = (p.x*100)+'%'; el.style.top = (p.y*100)+'%'; }
+    });
+    if(k < 1){ animRaf = requestAnimationFrame(frame); }
+    else { done && done(); }
+  }
+  animRaf = requestAnimationFrame(frame);
+}
+function runFrom(i){
+  if(!playing) return;
+  const next = i + 1;
+  if(next >= steps.length){
+    if(loop){ animateTo(steps[0], 750, () => { stepIndex = 0; applyStep(steps[0]); runFrom(0); }); }
+    else { stopPlay(); }
+    return;
+  }
+  animateTo(steps[next], 750, () => { stepIndex = next; applyStep(steps[next]); runFrom(next); });
+}
+function play(){
+  if(playing){ stopPlay(); return; }
+  if(steps.length < 2){ hintbar.innerHTML = '▶ Añade al menos <b>2 pasos</b> para reproducir la jugada.'; setTimeout(() => setMode(mode), 1900); return; }
+  if(stepIndex >= steps.length - 1){ goToStep(0); }
+  steps[stepIndex] = snapshotStep();
+  playing = true; suppressStepSync = true;
+  const btn = document.getElementById('playBtn'); if(btn) btn.textContent = '⏸ Parar';
+  runFrom(stepIndex);
+}
+function stopPlay(){
+  playing = false;
+  cancelAnimationFrame(animRaf); animRaf = 0;
+  const btn = document.getElementById('playBtn'); if(btn) btn.textContent = '▶ Reproducir';
+  suppressStepSync = true;
+  renderAll();
+  saveState();
+  suppressStepSync = false;
+}
+
+/* =========================================================
    9. MODOS / FORMACIÓN / TOGGLES
    ========================================================= */
 const HINTS = {
@@ -1081,6 +1236,7 @@ const HINTS = {
   erase: '🧽 <b>Borrar:</b> toca una flecha, un cono o un balón para eliminarlo.'
 };
 function setMode(m){
+  if(playing) stopPlay();
   mode = m;
   document.querySelectorAll('.modebtn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   pitch.classList.toggle('mode-draw', m === 'arrow' || m === 'pass' || m === 'pen');
@@ -1097,6 +1253,13 @@ function updateTeamTabs(){
   b.classList.toggle('rival', false);
   r.classList.toggle('active', teamFilter === 'rival');
   r.classList.toggle('rival', teamFilter === 'rival');
+  syncFormationUI();
+}
+function syncFormationUI(){
+  const sel = document.getElementById('formation');
+  if(sel) sel.value = formations[teamFilter] || '4-3-3';
+  const lbl = document.getElementById('formTeamName');
+  if(lbl) lbl.textContent = (teamFilter === 'rival') ? 'Rival' : 'Barça';
 }
 function selectTeam(team, keepSelection){
   teamFilter = team;
@@ -1108,8 +1271,8 @@ document.getElementById('tabBarca').addEventListener('click', () => selectTeam('
 document.getElementById('tabRival').addEventListener('click', () => selectTeam('rival'));
 
 document.getElementById('formation').addEventListener('change', (e) => {
-  currentFormation = e.target.value;
-  const coords = FORMATIONS[currentFormation];
+  formations[teamFilter] = e.target.value;
+  const coords = FORMATIONS[e.target.value];
   const field = players.filter(p => p.place === 'field' && p.team === teamFilter)
     .sort((a,b) => (ROLE_ORDER[a.pos]-ROLE_ORDER[b.pos]) || (a.num-b.num));
   field.forEach((p,i) => {
@@ -1143,6 +1306,14 @@ document.getElementById('clearConesBtn').addEventListener('click', () => { cones
 document.getElementById('clearBallsBtn').addEventListener('click', () => { balls = []; renderField(); renderStats(); saveState(); });
 document.getElementById('removeSelBtn').addEventListener('click', removeSelected);
 
+/* --- Jugadas por pasos --- */
+document.getElementById('stepPrevBtn').addEventListener('click', () => goToStep(stepIndex - 1));
+document.getElementById('stepNextBtn').addEventListener('click', () => goToStep(stepIndex + 1));
+document.getElementById('stepAddBtn').addEventListener('click', addStep);
+document.getElementById('stepDelBtn').addEventListener('click', deleteStep);
+document.getElementById('playBtn').addEventListener('click', play);
+document.getElementById('loopBtn').addEventListener('click', (e) => { loop = !loop; e.currentTarget.classList.toggle('on', loop); saveState(); });
+
 /* Quitar el elemento seleccionado (cono o balón); los jugadores no se borran */
 function removeSelected(){
   if(!selected){ hintbar.innerHTML = '🗑 Toca antes un cono o un balón para poder quitarlo.'; setTimeout(()=>setMode(mode),1400); return; }
@@ -1171,10 +1342,11 @@ document.getElementById('resetBtn').addEventListener('click', () => {
 
 /* --- Guardar / Cargar (localStorage) --- */
 function saveState(){
+  if(steps.length && !suppressStepSync && !playing){ steps[stepIndex] = snapshotStep(); }
   try{
     localStorage.setItem(KEY, JSON.stringify({
       players: players.map(p => ({ uid:p.uid, place:p.place, x:p.x, y:p.y, r:p.r })),
-      arrows, cones, balls, strokes, currentFormation, showNames, showRatings, subCount, teamFilter
+      arrows, cones, balls, strokes, formations, steps, stepIndex, showNames, showRatings, subCount, teamFilter
     }));
   }catch(_){}
 }
@@ -1194,7 +1366,15 @@ function loadState(){
     balls = (d.balls || []).map((k,i) => ({ id:k.id || ('b'+i), x:k.x, y:k.y }));
     ballSeq = balls.length;
     strokes = (d.strokes || []).map(s => ({ points: s.points || [], color: s.color, width: s.width }));
-    currentFormation = d.currentFormation || '4-3-3';
+    formations = d.formations || { barca: d.currentFormation || '4-3-3', rival: '4-3-3' };
+    steps = (d.steps || []).map(s => ({
+      players: (s.players || []).map(p => ({ uid:p.uid, place:p.place, x:p.x, y:p.y })),
+      arrows: (s.arrows || []).map(a => ({ x1:a.x1, y1:a.y1, x2:a.x2, y2:a.y2, type:a.type })),
+      strokes: (s.strokes || []).map(x => ({ points:(x.points||[]).map(q => ({ x:q.x, y:q.y })), color:x.color, width:x.width })),
+      cones: (s.cones || []).map(k => ({ id:k.id, x:k.x, y:k.y })),
+      balls: (s.balls || []).map(k => ({ id:k.id, x:k.x, y:k.y }))
+    }));
+    stepIndex = clamp(d.stepIndex || 0, 0, Math.max(0, steps.length - 1));
     showNames = d.showNames !== false;
     showRatings = d.showRatings !== false;
     subCount = d.subCount || 0;
@@ -1359,7 +1539,7 @@ function boot(skipLoad){
   if(!skipLoad){
     if(!loadState()) defaultSquad();
   }
-  document.getElementById('formation').value = currentFormation;
+  syncFormationUI();
   document.body.classList.toggle('hide-names', !showNames);
   document.body.classList.toggle('hide-ratings', !showRatings);
   document.getElementById('namesBtn').classList.toggle('on', showNames);
